@@ -1,4 +1,5 @@
 from django import forms
+from django.contrib.postgres.forms import JSONField
 
 
 class FileInfo:
@@ -67,13 +68,15 @@ class BaseFieldMapFormSet(forms.BaseFormSet):
     def non_field_errors(self):
         return self.non_form_errors()
 
-
 class FieldMapForm(forms.Form):
-    field = forms.CharField(max_length=100, help_text="The article field")
+    field = forms.CharField(max_length=100, help_text="The target field in the articleset")
     column = forms.CharField(max_length=100, required=False,
                              help_text="The source column or field in the uploaded file")
     value = forms.CharField(max_length=200, required=False,
                             help_text="The literal value to assign to the field")
+    use_default = forms.BooleanField(required=False, label="Use Value as default", widget=forms.CheckboxInput,
+                            help_text="If checked, the 'value' field will be used as default if the given file field is empty or missing. "
+                                      "Otherwise, if not checked and a field is empty, attempting to upload the file will result in an article error.")
 
     def __init__(self, *args, file_info=None, required_field=False, **kwargs):
         self.file_info = file_info
@@ -88,12 +91,27 @@ class FieldMapForm(forms.Form):
 
     def clean(self):
         cleaned_data = super().clean()
-        if bool(cleaned_data['value']) == bool(cleaned_data['column']):
+        if not cleaned_data.get('use_default') and (bool(cleaned_data['value']) == bool(cleaned_data['column'])):
             raise forms.ValidationError("Fill in one of 'value' or 'column'")
         if self.file_info and cleaned_data['column'] and cleaned_data['column'] not in self.file_info.file_fields:
             raise forms.ValidationError("Field {} does not exist in file {}".format(cleaned_data['column'],
                                                                                     self.file_info.file_name))
         return cleaned_data
+
+class FieldMapMixin:
+
+    def clean_field_map(self):
+        data = self.cleaned_data['field_map']
+        errors = []
+        for k, v in data.items():
+            if not isinstance(v, dict):
+                errors.append(forms.ValidationError("Invalid field {}.".format(k)))
+            if not v.get('use_default') and (('column' in v) == ('value' in v)):
+                errors.append(forms.ValidationError("Fill in exactly one of 'column' or 'value'."))
+
+        if errors:
+            raise forms.ValidationError(errors)
+        return data
 
 
 def get_form_set(required_fields, existing_fields):
@@ -101,3 +119,4 @@ def get_form_set(required_fields, existing_fields):
     formset.required_fields = required_fields
     formset.existing_fields = existing_fields
     return formset
+

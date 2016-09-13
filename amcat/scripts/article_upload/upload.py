@@ -23,6 +23,8 @@ Base module for article upload scripts
 import datetime
 import logging
 import os.path
+import tempfile
+import pickle
 
 from django import forms
 from django.forms.widgets import HiddenInput
@@ -38,6 +40,15 @@ ARTICLE_FIELDS = ("text", "title", "url", "date", "parent_hash")
 
 class ParseError(Exception):
     pass 
+
+class ArticleError(ParseError):
+    pass
+
+class MissingValueError(ArticleError):
+    def  __init__(self, field, *args):
+        super().__init__("Missing value for field: '{}'".format(field), *args)
+
+
 
 
 class UploadForm(RawFileUploadForm):
@@ -88,6 +99,7 @@ class UploadScript(script.Script):
     input_type = None
     options_form = UploadForm
 
+
     def __init__(self, *args, **kargs):
         super(UploadScript, self).__init__(*args, **kargs)
         self.project = self.options['project']
@@ -108,7 +120,7 @@ class UploadScript(script.Script):
     def explain_error(self, error, article=None):
         """Explain the error in the context of unit for the end user"""
         index = " {}".format(article) if article is not None else ""
-        return "Error in element{}: {}".format(article, error)
+        return "Error in article or filepart{}: {}.".format(index, error)
 
     def decode(self, bytes):
         """Decode the bytes using the encoding from the form"""
@@ -132,12 +144,12 @@ class UploadScript(script.Script):
                 "using {self.__class__.__name__}".format(**locals()))
 
     def parse_file(self, file):
-        for i, unit in enumerate(self._get_units(file)):
+        for i, unit in enumerate(self._get_units(file), 1):
             try:
                 for a in self._scrape_unit(unit):
                     yield a
             except ParseError as e:
-                self.errors.append(ParseError("{}".format(self.explain_error(e, index=i))))
+                self.errors.append(ParseError("{}".format(self.explain_error(e, article=i))))
 
     def run(self, _dummy=None):
         monitor = self.progress_monitor
@@ -156,6 +168,7 @@ class UploadScript(script.Script):
             monitor.update(20 / nfiles, "Parsing file {i}/{nfiles}: {filename}".format(**locals()))
             articles += list(self.parse_file(f))
 
+        print(articles)
         for article in articles:
             _set_project(article, self.project)
         
@@ -200,7 +213,37 @@ class UploadScript(script.Script):
         if isinstance(result, Article):
             result = [result]
         for art in result:
-            yield art
+            if isinstance(art, dict):
+                yield self.article_from_dict(art)
+            else:
+                yield art
+
+    def article_from_dict(self, parse_dict):
+        mapped_fields = {}
+        if 'field_map' in self.options:
+            for field_to, field_from in self.options['field_map'].items():
+                print("{}: {}".format(field_to, field_from))
+                value = None
+                if 'column' in field_from:
+                    value = parse_dict.get(field_from['column'])
+                if value is None and (field_from.get('use_default') or 'column' not in field_from):
+                    try:
+                        value = field_from['value']
+                    except KeyError:
+                        raise MissingValueError(field_to)
+                mapped_fields[field_to] = value
+        article_kwargs = {}
+
+        for article_field in ARTICLE_FIELDS:
+            article_kwargs[article_field] = mapped_fields.pop(article_field, None)
+
+        for article_field in get_required():
+            if article_kwargs[article_field] is None:
+                raise MissingValueError(article_field)
+
+        article_kwargs['properties'] = mapped_fields
+
+        return Article(**article_kwargs)
 
     def parse_document(self, document):
         """
@@ -228,3 +271,12 @@ def _set_project(art, project):
     except Project.DoesNotExist:
         pass  # django throws DNE on x.y if y is not set and not nullable
     art.project = project
+
+
+_required = set()
+def get_required():
+    if not _required:
+        for field in ARTICLE_FIELDS:
+            if not Article._meta.get_field(field).blank:
+                _required.add(field)
+    return _required

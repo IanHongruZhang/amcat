@@ -28,7 +28,6 @@ import re
 from amcat.scripts.article_upload.upload import UploadScript
 from amcat.models.article import Article
 from amcat.scripts.article_upload.pdf import PDFParser
-from amcat.models.medium import Medium
 from amcat.scripts.article_upload.bzk_aliases import BZK_ALIASES as MEDIUM_ALIASES
 
 
@@ -37,7 +36,7 @@ class BZKPDFScraper(UploadScript):
         parser = PDFParser()
         self.index = []
         article_lines = []
-        headline = ""
+        title = ""
         doc = parser.load_document(self.options['file'])
         for i, p in enumerate(parser.process_document(doc)):
             #is this page an index page?
@@ -58,21 +57,20 @@ class BZKPDFScraper(UploadScript):
                 if text.lower().strip() in [i[0].lower().strip() for i in self.index]:
 
                     # title is recognized. yield old article, start new
-                    if len(headline) > 0:
-                        article =  self.getarticle(headline, article_lines)
+                    if len(title) > 0:
+                        article =  self.getarticle(title, article_lines)
                         yield article
-                        
 
-                    headline = text
+                        title = text
                     article_lines = []
                                 
                 article_lines.append(text)
                 
             #last article
-            yield self.getarticle(headline, article_lines)
+            yield self.getarticle(title, article_lines)
                         
-    def getarticle(self, headline, lines):
-        article = Article(headline = headline)
+    def getarticle(self, title, lines):
+        article = Article(title = title)
         text = ""
         for line in lines[2:]:
             if len(line) > 2:
@@ -93,21 +91,14 @@ class BZKPDFScraper(UploadScript):
         result = pagenum_pattern.search(lines[1])
         if result:
             
-            article.pagenr = int(result.group(1))
+            article.properties = int(result.group(1))
 
         for h, medium in self.index:
             if article.headline.lower().strip() in h.lower().strip():
-                article.medium = self.create_medium(medium)
+                article.properties['medium'] = medium
 
         return article
 
-    def create_medium(self, medium):
-        if not medium or len(medium) < 1:
-            medium = "unknown"
-        if medium in MEDIUM_ALIASES.keys():
-            return Medium.get_or_create(MEDIUM_ALIASES[medium])
-        else:
-            return Medium.get_or_create(medium)
 
 if __name__ == "__main__":
     from amcat.scripts.tools import cli

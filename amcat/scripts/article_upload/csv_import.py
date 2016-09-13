@@ -28,7 +28,7 @@ from django.contrib.postgres.forms import JSONField
 from amcat.models import Article
 from amcat.scripts.article_upload import fileupload
 from amcat.scripts.article_upload.upload import UploadScript, ParseError, ARTICLE_FIELDS
-from amcat.scripts.article_upload.upload_formtools import get_form_set, FileInfo
+from amcat.scripts.article_upload.upload_formtools import get_form_set, FileInfo, FieldMapMixin
 from amcat.tools.toolkit import read_date
 from navigator.views.articleset_upload_views import UploadWizardForm
 
@@ -63,7 +63,7 @@ def get_parser(field_type):
     return PARSERS.get(field_type, lambda x: x)
 
 
-class CSVForm(UploadScript.options_form, fileupload.CSVUploadForm):
+class CSVForm(FieldMapMixin, UploadScript.options_form, fileupload.CSVUploadForm):
     field_map = JSONField(max_length=2048,
                           help_text='Dictionary consisting of "<field>":{"column":"<column name>"} and/or "<field>":{"value":"<value>"} mappings.')
 
@@ -72,19 +72,6 @@ class CSVForm(UploadScript.options_form, fileupload.CSVUploadForm):
 
     def __init__(self, *args, **kargs):
         super(CSVForm, self).__init__(*args, **kargs)
-
-    def clean_field_map(self):
-        data = self.cleaned_data['field_map']
-        errors = []
-        for k, v in data.items():
-            if not isinstance(v, dict):
-                errors.append(forms.ValidationError("Invalid field {}.".format(k)))
-            if ('column' in v) == ('value' in v):
-                errors.append(forms.ValidationError("Fill in exactly one of 'column' or 'value'."))
-
-        if errors:
-            raise forms.ValidationError(errors)
-        return data
 
     @classmethod
     def as_wizard_form(cls):
@@ -149,43 +136,8 @@ class CSV(UploadScript):
     def run(self, *args, **kargs):
         return super(CSV, self).run(*args, **kargs)
 
-    def parse_document(self, row, i=None):
-        properties = {}
-        article = {}
-
-        csvfields = self.options["field_map"]
-        for fieldname, csvfield in csvfields.items():
-            if 'column' in csvfield:
-                colname = csvfield['column']
-                val = row[colname]
-            elif 'value' in csvfield:
-                val = csvfield['value']
-
-            if not val and fieldname in ARTICLE_FIELDS:
-                article[fieldname] = None
-                continue
-
-            field_type = get_field_type(fieldname)
-            if not isinstance(val, field_type):
-                try:
-                    val = get_parser(field_type)(val)
-                except:
-                    raise ParseError(self._errors['parse_value'].format(val, field_type.__name__))
-
-            if fieldname in ARTICLE_FIELDS:
-                article[fieldname] = val
-            else:
-                properties[fieldname] = val
-
-        from logging import getLogger
-        getLogger(__name__).warning(article)
-        for field in get_required():
-            if field not in article or not article[field]:
-                if 'column' in csvfields[field]:
-                    raise ParseError(self._errors['empty_col'].format(csvfields[field]['column'], field))
-
-        article['properties'] = properties
-        return Article(**article)
+    def parse_document(self, row):
+        yield dict(row._asdict())
 
     def split_file(self, file):
         for reader in file:

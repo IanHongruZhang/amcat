@@ -23,8 +23,7 @@ Base module for article upload scripts
 import datetime
 import logging
 import os.path
-import tempfile
-import pickle
+
 
 from django import forms
 from django.forms.widgets import HiddenInput
@@ -38,16 +37,18 @@ log = logging.getLogger(__name__)
 
 ARTICLE_FIELDS = ("text", "title", "url", "date", "parent_hash")
 
+
 class ParseError(Exception):
-    pass 
+    pass
+
 
 class ArticleError(ParseError):
     pass
 
-class MissingValueError(ArticleError):
-    def  __init__(self, field, *args):
-        super().__init__("Missing value for field: '{}'".format(field), *args)
 
+class MissingValueError(ArticleError):
+    def __init__(self, field, *args):
+        super().__init__("Missing value for field: '{}'".format(field), *args)
 
 
 
@@ -67,7 +68,7 @@ class UploadForm(RawFileUploadForm):
     def clean_articleset_name(self):
         """If articleset name not specified, use file base name instead"""
         if 'articlesets' in self.errors:
-            #skip check if error in articlesets: cleaned_data['articlesets'] does not exist
+            # skip check if error in articlesets: cleaned_data['articlesets'] does not exist
             return
         if self.files.get('file') and not (
                     self.cleaned_data.get('articleset_name') or self.cleaned_data.get('articleset')):
@@ -77,7 +78,7 @@ class UploadForm(RawFileUploadForm):
         if not bool(name) ^ bool(self.cleaned_data['articlesets']):
             raise forms.ValidationError("Please specify either articleset or articleset_name")
         return name
-    
+
     @classmethod
     def get_empty(cls, project=None, post=None, files=None, **_options):
         f = cls(post, files) if post is not None else cls()
@@ -98,7 +99,6 @@ class UploadScript(script.Script):
 
     input_type = None
     options_form = UploadForm
-
 
     def __init__(self, *args, **kargs):
         super(UploadScript, self).__init__(*args, **kargs)
@@ -149,7 +149,7 @@ class UploadScript(script.Script):
                 for a in self._scrape_unit(unit):
                     yield a
             except ParseError as e:
-                self.errors.append(ParseError("{}".format(self.explain_error(e, article=i))))
+                raise ParseError("{}".format(self.explain_error(e, article=i)))
 
     def run(self, _dummy=None):
         monitor = self.progress_monitor
@@ -159,21 +159,28 @@ class UploadScript(script.Script):
         monitor.update(10, u"Importing {self.__class__.__name__} from {filename} into {self.project}"
                        .format(**locals()))
 
-        articles = []
+        articles_errors = []
 
         files = list(self._get_files())
         nfiles = len(files)
         for i, f in enumerate(files):
             filename = getattr(f, 'name', str(f))
             monitor.update(20 / nfiles, "Parsing file {i}/{nfiles}: {filename}".format(**locals()))
-            articles += list(self.parse_file(f))
+            articles_errors += [(x, None) if isinstance(x, Article) else (None, x) for x in self.parse_file(f)]
 
-        print(articles)
-        for article in articles:
-            _set_project(article, self.project)
-        
-        if self.errors:
-            raise ParseError(" ".join(map(str, self.errors)))
+        article_error = False
+        for article, error in articles_errors:
+            if error:
+                article_error = True
+            if isinstance(article, Article):
+                _set_project(article, self.project)
+
+        articles, errors = map(list, zip(*articles_errors))
+
+        if self.errors or article_error:
+            article_errors = [errors for error in errors if error]
+            raise ParseError(self.errors, article_errors)
+
         monitor.update(10, "All files parsed, saving {n} articles".format(n=len(articles)))
         Article.create_articles(articles, articlesets=self.articlesets,
                                 monitor=monitor.submonitor(40))
@@ -214,7 +221,10 @@ class UploadScript(script.Script):
             result = [result]
         for art in result:
             if isinstance(art, dict):
-                yield self.article_from_dict(art)
+                try:
+                    yield self.article_from_dict(art)
+                except ArticleError as e:
+                    yield e
             else:
                 yield art
 
@@ -222,7 +232,6 @@ class UploadScript(script.Script):
         mapped_fields = {}
         if 'field_map' in self.options:
             for field_to, field_from in self.options['field_map'].items():
-                print("{}: {}".format(field_to, field_from))
                 value = None
                 if 'column' in field_from:
                     value = parse_dict.get(field_from['column'])
@@ -274,6 +283,8 @@ def _set_project(art, project):
 
 
 _required = set()
+
+
 def get_required():
     if not _required:
         for field in ARTICLE_FIELDS:

@@ -28,9 +28,10 @@ from django.contrib.postgres.forms import JSONField
 from amcat.models import Article
 from amcat.scripts.article_upload import fileupload
 from amcat.scripts.article_upload.upload import UploadScript, ParseError, ARTICLE_FIELDS
-from amcat.scripts.article_upload.upload_formtools import get_form_set, FileInfo, FieldMapMixin
+from amcat.scripts.article_upload.upload_formtools import get_fieldmap_form_set, FileInfo, FieldMapMixin
 from amcat.tools.toolkit import read_date
-from navigator.views.articleset_upload_views import UploadWizardForm
+from amcat.tools.wizard import WizardStepForm
+from navigator.views.articleset_upload_views import UploadWizard
 
 REQUIRED = tuple(
     field.name for field in Article._meta.get_fields() if field.name in ARTICLE_FIELDS and not field.blank)
@@ -78,14 +79,16 @@ class CSVForm(FieldMapMixin, UploadScript.options_form, fileupload.CSVUploadForm
         return CSVWizardForm
 
 
-class CSVWizardForm(UploadWizardForm):
+class CSVWizardForm(UploadWizard):
+    inner_form = CSVForm
+
     def get_form_list(self):
-        upload_form = super().get_form_list()[0]
+        upload_form = self.get_upload_step_form()
         upload_form.base_fields['dialect'] = self.inner_form.base_fields['dialect']
-        field_form = get_form_set(REQUIRED, ARTICLE_FIELDS)
+        field_form = get_fieldmap_form_set(REQUIRED, ARTICLE_FIELDS)
         return [upload_form, field_form]
 
-    class CSVUploadStepForm(UploadScript.options_form, fileupload.CSVUploadForm): pass
+    class CSVUploadStepForm(WizardStepForm, UploadScript.options_form, fileupload.CSVUploadForm): pass
 
     @classmethod
     def get_upload_step_form(cls):
@@ -140,8 +143,11 @@ class CSV(UploadScript):
         yield dict(row._asdict())
 
     def split_file(self, file):
-        for reader in file:
-            yield reader
+        try:
+            for reader in file:
+                yield reader
+        except TypeError:
+            raise ParseError("Failed to read csv file")
 
     def explain_error(self, error, article=None):
         return "Error in row {}: {}".format(article, error)

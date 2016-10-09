@@ -1,5 +1,4 @@
 from django import forms
-from django.contrib.postgres.forms import JSONField
 
 
 class FileInfo:
@@ -114,7 +113,7 @@ class FieldMapMixin:
         return data
 
 
-def get_form_set(required_fields, existing_fields):
+def get_fieldmap_form_set(required_fields, existing_fields):
     formset = forms.formset_factory(FieldMapForm, formset=BaseFieldMapFormSet, validate_max=False, extra=2)
     formset.required_fields = required_fields
     formset.existing_fields = existing_fields

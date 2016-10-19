@@ -31,7 +31,7 @@
     {% endif %}
 
     <legend> Uploading articles using {{ script_name }} </legend>
-    <p>Step {{ wizard.step }} of {{ wizard.steps|length }}</p>
+    <p>Step {{ wizard.step|add:1 }} of {{ wizard.steps|length }}</p>
     {% if is_field_mapping_form  %}
         {% include "project/articleset_upload_fieldmap.html" %}
     {% else %}

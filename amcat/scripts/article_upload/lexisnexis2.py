@@ -5,18 +5,15 @@ from contextlib import contextmanager
 from logging import getLogger
 
 import pyparsing as pp
-from collections import namedtuple
-
 from django.contrib.postgres.forms import JSONField
 
-from amcat.models import Article
 from amcat.scripts.article_upload import fileupload
 from amcat.scripts.article_upload.csv_import import REQUIRED
-from amcat.scripts.article_upload.lexisnexis import BODY_KEYS_MAP
 from amcat.scripts.article_upload.upload import ARTICLE_FIELDS, UploadScript, ParseError
 from amcat.scripts.article_upload.upload_formtools import FileInfo, get_fieldmap_form_set, FieldMapMixin
 from amcat.tools.toolkit import read_date
-from navigator.views.articleset_upload_views import UploadWizardForm
+from amcat.tools.wizard import WizardStepFormMixin
+from navigator.views.articleset_upload_views import UploadWizard
 
 log = getLogger(__name__)
 QUARTERS = dict(spring=3,
@@ -246,13 +243,13 @@ class LexisNexisForm(UploadScript.options_form, fileupload.ZipFileUploadForm, Fi
         return LexisNexisWizardForm
 
 
-class LexisNexisWizardForm(UploadWizardForm):
+class LexisNexisWizardForm(UploadWizard):
     def get_form_list(self):
-        upload_form = super().get_form_list()[0]
+        upload_form = self.get_upload_step_form()
         field_form = get_fieldmap_form_set(REQUIRED, ARTICLE_FIELDS)
         return [upload_form, field_form]
 
-    class CSVUploadStepForm(UploadScript.options_form, fileupload.ZipFileUploadForm): pass
+    class CSVUploadStepForm(WizardStepFormMixin, UploadScript.options_form, fileupload.ZipFileUploadForm): pass
 
     @classmethod
     def get_upload_step_form(cls):

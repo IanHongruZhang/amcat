@@ -25,7 +25,7 @@ import datetime
 from django import forms
 from django.contrib.postgres.forms import JSONField
 
-from amcat.models import Article
+from amcat.models import Article, Project
 from amcat.scripts.article_upload import fileupload
 from amcat.scripts.article_upload.upload import UploadScript, ParseError, ARTICLE_FIELDS
 from amcat.scripts.article_upload.upload_formtools import get_fieldmap_form_set, FileInfo, FieldMapMixin
@@ -88,7 +88,8 @@ class CSVWizardForm(UploadWizard):
         field_form = get_fieldmap_form_set(REQUIRED, ARTICLE_FIELDS)
         return [upload_form, field_form]
 
-    class CSVUploadStepForm(WizardStepForm, UploadScript.options_form, fileupload.CSVUploadForm): pass
+    class CSVUploadStepForm(WizardStepForm, UploadScript.options_form, fileupload.CSVUploadForm):
+        project = forms.ModelChoiceField(queryset=Project.objects.all(), widget=forms.HiddenInput)
 
     @classmethod
     def get_upload_step_form(cls):
@@ -101,6 +102,7 @@ class CSVWizardForm(UploadWizard):
         firststep = next(iter(reader))
 
         return FileInfo(upload_form.cleaned_data['file'].name, firststep.column_names)
+
 
 
 class CSV(UploadScript):

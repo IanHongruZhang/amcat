@@ -1,5 +1,7 @@
 from django import forms
 
+from amcat.tools.wizard import WizardStepForm, WizardStepFormMixin
+
 
 class FileInfo:
     def __init__(self, file_name, file_fields):
@@ -7,7 +9,7 @@ class FileInfo:
         self.file_fields = set(file_fields)
 
 
-class BaseFieldMapFormSet(forms.BaseFormSet):
+class BaseFieldMapFormSet(WizardStepFormMixin, forms.BaseFormSet):
     existing_fields = frozenset()
     required_fields = frozenset()
 

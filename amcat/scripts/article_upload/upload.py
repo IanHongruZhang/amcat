@@ -97,7 +97,6 @@ class UploadScript(script.Script):
     get_units and scrape_unit.
     """
 
-    input_type = None
     options_form = UploadForm
 
     def __init__(self, *args, **kargs):

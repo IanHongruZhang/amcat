@@ -42,15 +42,11 @@ class Script(object):
     """
     'Abstract' class representing a modular piece of
     functionality. Scripts have three key parameters, specified as class variables:
-    - input_type: a class representing the type of input expected by the script, such as
-      None, str, Table, or ArticleList. The command line equivalent would be
-      a (deserialized) stdin stream
     - options: a Django form of required and optional options. The CLI equivalent
       are the command line options and arguments. Can be None
     - output_type: a class representing the output that the script will produce.
     """
 
-    input_type = None
     options_form = None
 
     def __init__(self, options=None, monitor=ProgressMonitor(), **kargs):

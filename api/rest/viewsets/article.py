@@ -77,8 +77,6 @@ class ArticleViewSetMixin(AmCATViewSetMixin):
 from rest_framework import serializers
 class ArticleListSerializer(serializers.ListSerializer):
     def to_internal_value(self, data):
-        # override to change uuid parents into ids
-        # there might be a better place to do this?
         if not isinstance(data, list):
             raise ValidationError("Article upload content should be a list of dicts!")
         def _process_ids(article):
@@ -88,28 +86,7 @@ class ArticleListSerializer(serializers.ListSerializer):
         
         data = [_process_ids(a) for a in data]
         
-        internal_uuids = {a['uuid']: a for a in data if a.get('uuid')}
-        parent_uuids = {a['parent']: a for a in data if is_uuid(a.get('parent'))}
-
-        to_lookup = set(parent_uuids) - set(internal_uuids)
-        existing = {str(uuid): id for (uuid, id) in
-                    Article.objects.filter(uuid__in = to_lookup).values_list("uuid", "id")}
-
-        result = []
-        for a in data:
-            parent = a.get('parent')
-            if is_uuid(parent):
-                if parent in existing: # update with parent=id from database
-                    a['parent'] = existing[parent]
-                elif parent in internal_uuids: # add child to parent's children list, remove from result
-                    del a['parent']
-                    internal_uuids[parent].setdefault('children', []).append(a)
-                    continue # don't add this to result
-                else:
-                    logging.warn("Unknown parent: {parent}".format(**locals()))
-                    a['parent'] = None
-            result.append(a)
-        return super(ArticleListSerializer, self).to_internal_value(result)
+        return super(ArticleListSerializer, self).to_internal_value(data)
         
         
         
@@ -118,37 +95,30 @@ class ArticleListSerializer(serializers.ListSerializer):
             for adict in article_dicts:
                 children = adict.pop("children")
                 if parent is not None:
-                    assert 'parent' not in adict
-                    adict['parent'] = parent
+                    assert 'parent_hash' not in adict
+                    adict['parent_hash'] = parent.compute_hash()
                 article = Article(**adict)
                 yield article
-                for a in _process_children(children, parent=article):
-                    yield a
+                yield from _process_children(children, parent=article)
 
         articleset = self.context["view"].kwargs.get('articleset')
-        if articleset: articleset = ArticleSet.objects.get(pk=articleset)
+        if articleset:
+            articleset = ArticleSet.objects.get(pk=articleset)
 
-        result = []
         to_add = [a['id'] for a in validated_data if "id" in a]
         to_create = [a for a in validated_data if "id" not in a]
         if to_create:
             articles = list(_process_children(to_create))
-            Article.create_articles(articles, articleset=articleset)
-            result += articles
+            yield from Article.create_articles(articles, articleset=articleset)
         if to_add:
             _check_read_access(self.context['request'].user, to_add)
             articleset.add_articles(to_add)
-            result += list(Article.objects.filter(pk__in=to_add).only("pk"))
-            
-        return result
-
+            yield from Article.objects.filter(pk__in=to_add).only("pk")
 
     def to_representation(self, data):
-        # check if text attribute is defferred
+        # check if text attribute is defferred  - is this still needed?
         if u'RelatedManager' in str(type(data)):
             data = list(data.all())
-        parents = [a.parent_id for a in data if a.parent_id]
-        uuids = dict(Article.objects.filter(pk__in=parents).values_list("pk", "uuid"))
         result = super(ArticleListSerializer, self).to_representation(data)
         for r in result:
             if r.get('parent'):
@@ -166,9 +136,14 @@ class ArticleSerializer(AmCATProjectModelSerializer):
             if set(data.keys()) != {"id"}:
                 raise ValidationError("When uploading explicit ID, specifying other fields is not allowed")
             return {"id": int(data['id'])}
-            
+        if 'properties' not in data:
+            data['properties'] = {}
         if 'children' not in data:
             data['children'] = []
+        ARTICLE_FIELDS = set(super(ArticleSerializer, self).get_fields().keys())
+        # add all other fields to properties
+        for field in data.keys() - (ARTICLE_FIELDS | {"children"}):
+            data['properties'][field] = data.pop(field)
         return super(ArticleSerializer, self).to_internal_value(data)
 
     def create(self, validated_data):
@@ -180,11 +155,11 @@ class ArticleSerializer(AmCATProjectModelSerializer):
             art = Article.objects.get(pk=validated_data['id'])
             if articleset:
                 articleset.add_articles([art])
-            return art
-        
-        validated_data.pop('children')
-        art = Article(**validated_data)
-        Article.create_articles([art], articleset=articleset)
+
+        else:
+            validated_data.pop('children')
+            art = Article(**validated_data)
+            Article.create_articles([art], articleset=articleset)
         return art
 
     def get_fields(self):
@@ -199,13 +174,13 @@ class ArticleSerializer(AmCATProjectModelSerializer):
         if self.context['request'].method == "POST":
             return {"id": data.id}
         result = super(ArticleSerializer, self).to_representation(data)
+        result.update(result.pop('properties'))
         return result
         
     class Meta:
         model = Article
         read_only_fields = ('id', 'insertdate', 'insertscript')
         list_serializer_class = ArticleListSerializer
-
         
 class SmartParentFilter(MappingOrderingFilter):
     def get_ordering(self, request, queryset, view):

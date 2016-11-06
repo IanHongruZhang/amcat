@@ -25,6 +25,7 @@ import datetime
 import inspect
 
 from amcat.tools import toolkit, amcattest
+from amcat.tools.toolkit import wrapped
 
 
 class TestToolkit(amcattest.AmCATTestCase):
@@ -51,12 +52,6 @@ class TestToolkit(amcattest.AmCATTestCase):
             ("1980-3-22T01:00:05" , datetime.datetime(1980, 3, 22,1,0,5), False, True),
             ("1980-3-22 01:00" , datetime.datetime(1980, 3, 22,1,0,0), False, True),
             ("1980-3-22 01:00 PM" , datetime.datetime(1980, 3, 22,13,0,0), False, True),
-            ("1980-3-22 01:00:00:00" , datetime.datetime(1980, 3, 22,0,0,0), False, True), #time->0
-            ("1980-13-22 01:00:00:00" , None, False, True), # illegal date --> None
-            ("1980-13-22 01:00:00" , ValueError, False, False), # illegal date --> Error
-            ("1980-3-22 27:00:00" , ValueError, False, False), # illegal time --> Error
-            ("1980-3-22 23:00:00:00" , ValueError, False, False), # illegal time --> Error
-            ("Sun Sep 29 18:21:12 +0000 2013", datetime.datetime(2013,9,29,18,21,12), False, False), # twitter (??)
             ("1/1/98", datetime.datetime(1998, 1, 1,0,0,0), False, True),
             ("1/1/04", datetime.datetime(2004, 1, 1,0,0,0), False, True),
             ("31/12/72", datetime.datetime(1972, 12, 31,0,0,0), False, True),
@@ -79,13 +74,20 @@ class TestToolkit(amcattest.AmCATTestCase):
                 date2 = toolkit.read_date(s, lax=lax, american=american)
                 self.assertEqual(date2, date)
 
+    def test_random_alphanum(self):
+        self.assertEqual(len(toolkit.random_alphanum(1000)), 1000)
+        self.assertEqual(len(toolkit.random_alphanum(100)), 100)
+        self.assertEqual(len(toolkit.random_alphanum(80)), 80)
+        self.assertEqual(len(toolkit.random_alphanum(60)), 60)
+        self.assertNotEqual(toolkit.random_alphanum(100), toolkit.random_alphanum(100))
+
     def test_head(self):
         it = iter(range(10))
         self.assertEqual(0, toolkit.head(it))
         self.assertEqual(1, toolkit.head([1, 2]))
 
     def test_to_list(self):
-        @toolkit.to_list
+        @wrapped(list)
         def gen(n):
             return (i for i in range(n))
 

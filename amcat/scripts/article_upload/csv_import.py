@@ -21,6 +21,7 @@
 Plugin for uploading csv files
 """
 import datetime
+import logging
 
 from django import forms
 from django.contrib.postgres.forms import JSONField
@@ -31,7 +32,12 @@ from amcat.scripts.article_upload.upload import UploadScript, ParseError, ARTICL
     ZipFileUploadForm
 from amcat.scripts.article_upload.upload_formtools import get_fieldmap_form_set, FileInfo, FieldMapCleanMixin
 from amcat.tools.toolkit import read_date
-from amcat.tools.wizard import WizardStepForm
+from navigator.views.articleset_upload_views import UploadWizardForm
+
+log = logging.getLogger(__name__)
+
+REQUIRED = tuple(
+    field.name for field in Article._meta.get_fields() if field.name in ARTICLE_FIELDS and not field.blank)
 
 TYPES = {
     "date": datetime.datetime,
@@ -61,7 +67,7 @@ def get_parser(field_type):
     return PARSERS.get(field_type, lambda x: x)
 
 
-class CSVForm(FieldMapCleanMixin, ZipFileUploadForm):
+class CSVForm(UploadScript.options_form, fileupload.CSVUploadForm):
     field_map = JSONField(max_length=2048,
                           help_text='Dictionary consisting of "<field>":{"column":"<column name>"} and/or "<field>":{"value":"<value>"} mappings.')
 
@@ -70,6 +76,19 @@ class CSVForm(FieldMapCleanMixin, ZipFileUploadForm):
 
     def __init__(self, *args, **kargs):
         super(CSVForm, self).__init__(*args, **kargs)
+
+    def clean_field_map(self):
+        data = self.cleaned_data['field_map']
+        errors = []
+        for k, v in data.items():
+            if not isinstance(v, dict):
+                errors.append(forms.ValidationError("Invalid field {}.".format(k)))
+            if ('column' in v) == ('value' in v):
+                errors.append(forms.ValidationError("Fill in exactly one of 'column' or 'value'."))
+
+        if errors:
+            raise forms.ValidationError(errors)
+        return data
 
     @classmethod
     def as_wizard_form(cls):

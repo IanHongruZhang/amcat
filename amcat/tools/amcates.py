@@ -17,22 +17,22 @@
 # License along with AmCAT.  If not, see <http://www.gnu.org/licenses/>.  #
 ###########################################################################
 
-
 import datetime
+import functools
 import logging
 import os
 import re
 from collections import namedtuple
 from hashlib import sha224 as hash_class
 from json import dumps as serialize
+from typing import Union
 
 from django.conf import settings
-from elasticsearch import Elasticsearch, ImproperlyConfigured, NotFoundError
+from elasticsearch import Elasticsearch, NotFoundError
 from elasticsearch.helpers import scan, bulk
 
 from amcat.tools import queryparser, toolkit
 from amcat.tools.caching import cached
-from amcat.tools.djangotoolkit import get_model_field
 from amcat.tools.progress import ProgressMonitor
 from amcat.tools.toolkit import multidict, splitlist
 
@@ -56,13 +56,33 @@ RE_PROPERTY_NAME = re.compile('[A-Za-z][A-Za-z0-9]*$')
 
 _KNOWN_PROPERTIES = None
 
-def _is_valid_property_name(name):
-    if isinstance(name, str):
-        if "_" in name:
-            name, ptype = name.rsplit("_", 1)
-            if not ptype in settings.ES_MAPPING_TYPES:
-                return False
-        return RE_PROPERTY_NAME.match(name)
+
+@functools.lru_cache()
+def get_property_primitive_type(name) -> Union[int, float, str, datetime.datetime]:
+    """Based on a property name, determine its primitive Python type."""
+    if "_" in name:
+        return settings.ES_MAPPING_TYPE_PRIMITIVES[name[name.rfind("_")+1:]]
+
+    # Return type specified in ES_MAPPING
+    if name in settings.ES_MAPPING["properties"]:
+        for ptype, obj in settings.ES_MAPPING_TYPES.items():
+            if settings.ES_MAPPING["properties"][name] is obj:
+                return settings.ES_MAPPING_TYPE_PRIMITIVES[ptype]
+
+    # No type in name nor a 'special' field
+    return settings.ES_MAPPING_TYPE_PRIMITIVES["default"]
+
+
+def _is_valid_property_name(name: str) -> bool:
+    if not isinstance(name, str):
+        raise ValueError("property name should be a string")
+
+    if "_" in name:
+        name, ptype = name.rsplit("_", 1)
+        if not ptype in settings.ES_MAPPING_TYPES:
+            return False
+    return bool(RE_PROPERTY_NAME.match(name))
+
 
 def get_properties(article):
     if article.properties:
@@ -113,7 +133,7 @@ HIGHLIGHT_OPTIONS = {
             "number_of_fragments": 3,
             'no_match_size': 100
         },
-        'headline': {
+        'title': {
             'no_match_size': 100 
         }
     }
@@ -283,7 +303,7 @@ class ES(object):
             'highlight': {
                 "fields": {
                     "text": get_highlight_query(query, "text"),
-                    "headline": get_highlight_query(query, "headline"),
+                    "title": get_highlight_query(query, "title"),
                     "byline": get_highlight_query(query, "byline"),
                 }
             }
@@ -302,7 +322,7 @@ class ES(object):
         except NotFoundError:
             pass
         except Exception as e:
-            if 'IndexMissingException' in str(error_msg):
+            if 'IndexMissingException' in str(e):
                 return
             raise
 
@@ -441,7 +461,7 @@ class ES(object):
 
         return result
 
-    def get_used_properties(self, *sets):
+    def get_used_properties(self, sets):
         """
         Returns a sequency of property names in use in the specified set(s) (or setids)
         """
@@ -489,7 +509,7 @@ class ES(object):
             monitor.update(40/nbatches, "Added batch {iplus}/{nbatches}".format(iplus=i+1, **locals()))
             self.bulk_update(batch, UPDATE_SCRIPT_ADD_TO_SET, params={'set' : setid})
 
-    def term_vector(self, aid, fields=["text", "headline"]):
+    def term_vector(self, aid, fields=["text", "title"]):
 
         # elasticsearch client supports term vectors from version 2.0
         # so we do it 'manually' for now:
@@ -773,7 +793,7 @@ class ES(object):
         Check whether a duplicate of the given article already exists.
         If so, returns the sets that the duplicate is a member of.
         Duplication is checked using de get_hash function, so article
-        should be an object with the appropriate attributes (.headline etc)
+        should be an object with the appropriate attributes (.title etc)
         @return: A (possibly empty) sequence of results with .id and .sets
         """
         hash = get_article_dict(article).hash

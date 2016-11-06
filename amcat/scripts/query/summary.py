@@ -17,22 +17,20 @@
 # License along with AmCAT.  If not, see <http://www.gnu.org/licenses/>.  #
 ###########################################################################
 
-import json
 import datetime
+import json
+import re
 
 from django.forms import IntegerField, BooleanField
-from django.http import QueryDict
 from django.template import Context
-from django.template.loader import get_template
 from django.template.defaultfilters import escape as escape_filter
+from django.template.loader import get_template
 
 from amcat.forms.forms import order_fields
 from amcat.scripts.query import QueryAction, QueryActionForm
 from amcat.tools.aggregate_es import IntervalCategory, fill_zeroes
 from amcat.tools.keywordsearch import SelectionSearch
 from amcat.tools.toolkit import Timer
-
-import re
 
 TEMPLATE = get_template('query/summary/summary.html')
 
@@ -55,8 +53,8 @@ class SummaryActionForm(QueryActionForm):
 def escape_article_result(article):
     if hasattr(article,'highlight'):
         try:
-            article.highlight['headline'][0] = escape_filter(article.highlight['headline'][0])
-            article.highlight['headline'][0] = re.sub(r'&lt;(\/?)mark&gt;',r'<\1mark>',article.highlight['headline'][0])
+            article.highlight['title'][0] = escape_filter(article.highlight['title'][0])
+            article.highlight['title'][0] = re.sub(r'&lt;(\/?)mark&gt;',r'<\1mark>',article.highlight['title'][0])
         except KeyError:
             pass
         try:
@@ -69,6 +67,7 @@ def escape_article_result(article):
 class SummaryAction(QueryAction):
     output_types = (("text/html+summary", "HTML"),)
     form_class = SummaryActionForm
+    monitor_steps = 4
 
     def run(self, form):
         form_data = json.dumps(dict(form.data.lists()))
@@ -79,13 +78,13 @@ class SummaryAction(QueryAction):
 
         with Timer() as timer:
             selection = SelectionSearch(form)
-            self.monitor.update(1, "Executing query..")
+            self.monitor.update(message="Executing query..")
             narticles = selection.get_count()
-            self.monitor.update(59, "Fetching articles..".format(**locals()))
+            self.monitor.update(message="Fetching articles..".format(**locals()))
             articles = [escape_article_result(art) for art in selection.get_articles(size=size, offset=offset)]
 
             if show_aggregation:
-                self.monitor.update(69, "Aggregating..".format(**locals()))
+                self.monitor.update(message="Aggregating..".format(**locals()))
                 
                 statistics = selection.get_statistics()
                 try:
@@ -97,7 +96,11 @@ class SummaryAction(QueryAction):
 
                 date_aggr = selection.get_nested_aggregate([IntervalCategory(interval)])
                 date_aggr = fill_zeroes((((date,),(value,)) for date,value in date_aggr), IntervalCategory(interval))
-            self.monitor.update(79, "Rendering results..".format(**locals()))
+            else:
+                # Increase progress without doing anything (because we don't have to aggregate)
+                self.monitor.update()
+
+            self.monitor.update(message="Rendering results..".format(**locals()))
 
         return TEMPLATE.render(Context(dict(locals(), **{
             "project": self.project, "user": self.user

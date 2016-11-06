@@ -37,6 +37,7 @@ from amcat.models.project import Project
 from amcat.models.user import THEMES
 from amcat.tools import toolkit
 from navigator.utils.misc import cache_function
+from settings import MAX_SIGNUP_ROLEID
 
 logger = logging.getLogger(__name__)
 
@@ -106,25 +107,26 @@ class SplitArticleForm(forms.Form):
         self.fields["add_to_sets"].queryset = project.all_articlesets()
 
 class UserForm(forms.ModelForm):
-    role = forms.ModelChoiceField(queryset=Role.objects.all())
-    language = forms.ModelChoiceField(queryset=Language.objects.all(), initial="en")
-    #theme = forms.ChoiceField(choices=[(t,t) for t in THEMES])
+    role = forms.ModelChoiceField(queryset=Role.objects.filter(projectlevel=False))
 
     def __init__(self, request, editing=True, *args, **kwargs):
         super(UserForm, self).__init__(*args, **kwargs)
 
         if not request.user.is_anonymous():
+            # Only show roles lesser or equal to the current role of the user
             uprofile = request.user.userprofile
 
-            # Only show roles lesser or equal to the current role of the user
             self.fields['role'].queryset = Role.objects.filter(
                 projectlevel=False, id__lte=uprofile.role.id
             )
 
             # Set initial values for this user
             self.fields['role'].initial = uprofile.role if not editing else kwargs['instance'].userprofile.role
-            self.fields['language'].initial = uprofile.language
-            self.fields['theme'].initial = uprofile.theme
+        else:
+            # Only show roles appropriate for anonymous users
+            self.fields['role'].queryset = Role.objects.filter(
+                projectlevel=False, id__lte=MAX_SIGNUP_ROLEID
+            )
 
         # We don't use Django groups and permissions
         for fi in ("groups", "user_permissions"):
@@ -136,15 +138,13 @@ class UserForm(forms.ModelForm):
 
         up = u.userprofile
         up.role = self.cleaned_data['role']
-        up.language = self.cleaned_data['language']
-        up.theme = self.cleaned_data['theme']
         up.save()
 
         return u
 
     class Meta:
         model = User
-        fields = ("role", "language")
+        fields = ("role",)
 
 class UserDetailsForm(UserForm):
     def __init__(self, request, *args, **kwargs):

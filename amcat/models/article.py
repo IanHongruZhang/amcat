@@ -22,30 +22,21 @@ Model module containing the Article class representing documents in the
 articles database table.
 """
 
-
 import logging
-import collections
-import binascii
-
-from django.db import models
-from django.template import Context
-
-from django.core.exceptions import PermissionDenied
-from django.template.defaultfilters import escape as escape_filter
-from django.template.loader import get_template
 
 from django.contrib.postgres.fields import JSONField
-
+from django.core.exceptions import PermissionDenied
+from django.db import models
+from django.template.defaultfilters import escape as escape_filter
 from django_hash_field import HashField
 
+from amcat.models.authorisation import ROLE_PROJECT_READER
 from amcat.models.authorisation import Role
 from amcat.tools import amcates
 from amcat.tools.djangotoolkit import bulk_insert_returning_ids
-from amcat.tools.model import AmcatModel, PostgresNativeUUIDField
+from amcat.tools.model import AmcatModel
 from amcat.tools.progress import ProgressMonitor
 from amcat.tools.toolkit import splitlist
-from amcat.tools.tree import Tree
-from amcat.models.authorisation import ROLE_PROJECT_READER
 
 log = logging.getLogger(__name__)
 
@@ -53,8 +44,7 @@ import re
 
 WORD_RE_STRING = re.compile('[{L}{N}]+')  # {L} --> All letters
 WORD_RE_BYTES = re.compile(b'[{L}{N}]+')  # {L} --> All letters
-# {N} --> All numbers
-
+                                          # {N} --> All numbers
 
 def word_len(txt):
     """Count words in `txt`
@@ -108,7 +98,7 @@ class Article(AmcatModel):
 
     def highlight(self, query, escape=True, keep_em=True):
         """
-        Highlight headline and text property by inserting HTML tags (em). You won't be able to
+        Highlight title and text property by inserting HTML tags (em). You won't be able to
         call save() after calling this method.
 
         @param query: elastic query used for highlighting
@@ -197,6 +187,16 @@ class Article(AmcatModel):
     def __repr__(self):
         return "<Article %s: %r>" % (self.id, self.title)
 
+    def get_article_dict(self, **kargs):
+        return amcates.get_article_dict(self, **kargs)
+
+    def compute_hash(self):
+        hash = self.get_article_dict()['hash']
+        if self.hash and self.hash != hash:
+            raise ValueError("Incorrect hash specified")
+        self.hash = hash
+        return hash
+    
     @classmethod
     def exists(cls, article_ids, batch_size=500):
         """
@@ -214,56 +214,23 @@ class Article(AmcatModel):
 
         Duplicates are detected and have .duplicate and .id set (and are added to sets)
 
-        @param articles: a collection of objects with the necessary properties (.headline etc)
+        @param articles: a collection of objects with the necessary properties (.title etc)
         @param articleset(s): articleset object(s), specify either or none
         """
-        cls._create_articles(articles, deduplicate=deduplicate)
         if articlesets is None:
             articlesets = [articleset] if articleset else []
-        es = amcates.ES()
-        dupes, new = [], []
-        for a in articles:
-            if a.duplicate:
-                dupes.append(a)
-            else:
-                a.es_dict.update({'sets': [aset.id for aset in articlesets],
-                                  'id': a.id})
-                new.append(a)
-
-        if new:
-            es.bulk_insert([a.es_dict for a in new], batch_size=100)
-            for aset in articlesets:
-                aset.add_articles(new, add_to_index=False)
-        if dupes:
-            for aset in articlesets:
-                aset.add_articles(dupes, add_to_index=True)
             
-    
-    @classmethod
-    def _create_articles(cls, articles, deduplicate=True):
-        """Check duplicates and save the articles to db.
-        Does *not* save to elastic or add to articlesets
-        Assumes that if .parent is given, it has an id
-        (because parent is part of hash)
-        modifies all articles in place with .hash, .id, .uuid, and .duplicate (None or Article)
-        """
-        es = amcates.ES()
-        hashes = {} # {hash: article}
-        
         # Iterate over articles, mark duplicates within addendum and build hashes dictionaries
+        hashes = {} # {hash: article}
         for a in articles:
             if a.id:
                 raise ValueError("Specifying explicit article ID in save not allowed")
-            a.es_dict = amcates.get_article_dict(a)
-            hash = a.es_dict['hash']
-            if a.hash and a.hash != hash:
-                raise ValueError("Incorrect hash specified")
-            a.hash = hash
-            a.duplicate, a.internal_duplicate = None, None # innocent until proven guilty
+            a.compute_hash()
+            a.duplicate = None # innocent until proven guilty
             if not deduplicate:
                 continue
             if a.hash in hashes:
-                a.internal_duplicate = hashes[a.hash]
+                a.duplicate = hashes[a.hash]
             else:
                 hashes[a.hash] = a
 
@@ -276,15 +243,23 @@ class Article(AmcatModel):
                 dupe.id = orig.id
 
         # now we can save the articles and set id
-        to_insert = [a for a in articles if not (a.duplicate or a.internal_duplicate)]
-        result = bulk_insert_returning_ids(to_insert)
+        to_insert = [a for a in articles if not a.duplicate]
         if to_insert:
+            result = bulk_insert_returning_ids(to_insert)
             for a, inserted in zip(to_insert, result):
                 a.id = inserted.id
-            for a in articles:
-                if a.internal_duplicate and not a.id:
-                    a.id = a.internal_duplicate.id
-        return to_insert
+            dicts = [a.get_article_dict(sets=[aset.id for aset in articlesets]) for a in to_insert]
+            amcates.ES().bulk_insert(dicts, batch_size=100)
+
+        # add new articles and duplicates to articlesets
+        new_ids = {a.id for a in to_insert}
+        dupes = {a.duplicate.id for a in articles if a.duplicate} - new_ids
+        for aset in articlesets:
+            if new_ids:
+                aset.add_articles(new_ids, add_to_index=False)
+            if dupes:
+                aset.add_articles(dupes, add_to_index=True)
+        return articles
 
 
 def _check_read_access(user, aids):

@@ -24,6 +24,9 @@ Plugin for uploading plain text files
 
 
 import logging
+from typing import Iterable
+
+from django.core.files import File
 
 log = logging.getLogger(__name__)
 import os.path, tempfile, subprocess
@@ -31,8 +34,7 @@ import os.path, tempfile, subprocess
 from django import forms
 from django.contrib.postgres.forms import JSONField
 
-from amcat.scripts.article_upload.upload import UploadScript
-from amcat.scripts.article_upload import fileupload
+from amcat.scripts.article_upload.upload import UploadScript, UploadParser, UploadWizardStepForm
 
 from amcat.models.article import Article
 from amcat.tools import toolkit
@@ -45,10 +47,7 @@ try:
 except ImportError:
     from io import StringIO
 
-class TextForm(UploadScript.options_form, fileupload.ZipFileUploadForm):
-    file = forms.FileField(
-        help_text="You can also upload a zip file containing the desired files. Uploading very large files can take a long time. If you encounter timeout problems, consider uploading smaller files",
-        required=False)
+class TextForm(UploadWizardStepForm):
 
     title = forms.CharField(required=False,
                                help_text='If left blank, use filename (without extension and optional date prefix) as title')
@@ -56,18 +55,15 @@ class TextForm(UploadScript.options_form, fileupload.ZipFileUploadForm):
                            help_text='If left blank, use date from filename, which should be of form "yyyy-mm-dd_name"')
     text = forms.CharField(widget=forms.Textarea, required=False)
     properties = JSONField(required=False, help_text='Enter additional properties as a valid json string')
-    
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
     def get_entries(self):
         if 'file' in self.files:
             return super(TextForm, self).get_entries()
         return [None]
 
-    def clean_text(self):
-        text = self.cleaned_data.get("text")
-        if not (text and text.strip()):
-            if 'file' not in self.files:
-                raise ValidationError("Please either upload a file or provide the text")
-        return text
 
 
 def _convert_docx(file):
@@ -109,7 +105,7 @@ def _convert_multiple(file, convertors):
     raise Exception("\n".join(errors))
 
 
-class Text(UploadScript):
+class TextParser(UploadParser):
     """
     Plain text uploader.
 
@@ -123,14 +119,15 @@ class Text(UploadScript):
 
     Files in .docx, .doc, or .pdf format will be automatically converted to plain text.
     """
-    options_form = TextForm
+    options_form_class = TextForm
 
     def get_headline_from_file(self):
         hl = self.options['file'].name
         if hl.endswith(".txt"): hl = hl[:-len(".txt")]
         return hl
 
-    def parse_document(self, file):
+
+    def parse_file(self, file) -> Iterable[File]:
         if file:
             dirname, filename = os.path.split(file.name)
             filename, ext = os.path.splitext(filename)
@@ -163,13 +160,15 @@ class Text(UploadScript):
         else:
             text = self.options['text']
 
-        return Article(text=text, **metadata)
+        yield Article(text=text, **metadata)
 
     def explain_error(self, error):
         """Explain the error in the context of unit for the end user"""
         name = getattr(error.unit, "name", error.unit)
         return "Error in file {name} : {error.error!r}".format(**locals())
 
+class Text(UploadScript):
+    parser_class = TextParser
 
 if __name__ == '__main__':
     from amcat.scripts.tools.cli import run_cli

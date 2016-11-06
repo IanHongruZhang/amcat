@@ -56,5 +56,9 @@
         <br/>
         <div class="alert alert-info" style="white-space:pre-wrap">{{ script_doc }}</div>
     {% endif %}
-
+    <script>
+    require(["jquery", "bootstrap-multiselect"], function($){
+        $('.multiselect').multiselect({"enableFiltering": true});
+    });
+    </script>
 {% endblock %}

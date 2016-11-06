@@ -19,6 +19,7 @@ class FormComplete(Exception):
     pass
 
 
+
 class Wizard:
     form_list = None
     fields = None
@@ -55,6 +56,11 @@ class Wizard:
             step = self.step
         return self.forms[step]
 
+    def get_bound_form(self, step=None):
+        if step is None:
+            step = self.step
+        kwargs = self.get_form_kwargs(step)
+        return self.forms[step](**kwargs)
 
     def next_step(self):
         next = self.step + 1
@@ -167,7 +173,6 @@ class WizardFile(UploadedFile):
         storage_dict['file'] = open(path, mode="rb")
         return cls(**storage_dict)
 
-
 class WizardStepFormMixin:
 
     def load_files(self):
@@ -198,6 +203,7 @@ class WizardStepFormMixin:
 
     def load_file(self, file_dict):
         return WizardFile.from_dict(file_dict)
+
 
 class WizardStepForm(WizardStepFormMixin, Form):
     def __init__(self, *args, **kwargs):
@@ -254,10 +260,11 @@ class WizardFormStepView(FormView):
 
     def get_wizard(self, request):
         id, step = self.get_wizard_data(request)
+        kwargs = self.get_wizard_kwargs()
         if id and self.wizard_class.id_exists(request.session, id):
-            wizard = self.wizard_class(request.session, step=step, id=id)
+            wizard = self.wizard_class(request.session, step=step, id=id, **kwargs)
         else:
-            wizard = self.wizard_class(request.session, step=0)
+            wizard = self.wizard_class(request.session, step=0, **kwargs)
         return wizard
 
     def get_context_data(self, **kwargs):
@@ -277,6 +284,10 @@ class WizardFormStepView(FormView):
             pass
 
         return wizard_id, step
+
+    def get_wizard_kwargs(self):
+        return {}
+
 
 def wizard_steps_factory(field_dicts: Iterable[dict], CBase:type=WizardStepForm) -> Iterable[type]:
     for field_dict in field_dicts:

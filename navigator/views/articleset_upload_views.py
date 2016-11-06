@@ -1,21 +1,19 @@
-import json
 import logging
-import os
 
-from django import forms
 from django.core.files.uploadedfile import UploadedFile
 from django.core.urlresolvers import reverse
 from django.shortcuts import redirect
 from django.views.generic import ListView
 
-from amcat.models import Plugin
-from amcat.scripts.article_upload.upload_formtools import FieldMapForm, BaseFieldMapFormSet
-from amcat.tools.wizard import Wizard, WizardStepForm, WizardFormStepView
+from amcat.models import Plugin, Task
+from amcat.scripts.article_upload.upload import UploadWizard, get_upload_wizard, UploadCreateArticlesScript
+from amcat.scripts.article_upload.upload_formtools import BaseFieldMapFormSet
+from amcat.tools.wizard import WizardFormStepView
 from api.rest.resources import PluginResource
 from navigator.views.articleset_views import ArticleSetListView, UPLOAD_PLUGIN_TYPE
 from navigator.views.datatableview import DatatableMixin
 from navigator.views.projectview import HierarchicalViewMixin, ProjectViewMixin, BreadCrumbMixin, BaseMixin
-from navigator.views.scriptview import ScriptHandler, get_temporary_file_dict
+from navigator.views.scriptview import ScriptHandler, get_temporary_file_dict, ScriptView
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +35,8 @@ class ArticleSetUploadScriptHandler(ScriptHandler):
     def get_redirect(self):
         aset_ids = self.task._get_raw_result()
 
+        return reverse("navigator:articleset-upload-fieldmap", args=[self.task.project.id])
+
         if len(aset_ids) == 1:
             return reverse("navigator:articleset-details", args=[self.task.project.id, aset_ids[0]]), "View set"
 
@@ -54,74 +54,31 @@ class ArticleSetUploadScriptHandler(ScriptHandler):
         arguments['files'].update(data)
         return arguments
 
+    def run_task(self):
+        result = super().run_task()
+
+        if not self.task.get_class().customizable_fields:
+            handler = ScriptHandler.call(UploadCreateArticlesScript,
+                               user=self.task.user,
+                               project=self.task.project,
+                               arguments={"calling_task": self.task.id,
+                                          "field_map": '"nomap"'}
+                               )
+
+        return result
+
+    def get_script(self):
+        script_cls = self.task.get_class()
+        kwargs = self.get_form_kwargs()
+        form = script_cls.options_form(**kwargs)
+        return script_cls(form)
+
     @classmethod
     def serialise_arguments(cls, arguments):
         arguments = super().serialise_arguments(arguments)
         arguments = cls.serialize_files(arguments)
         return arguments
 
-
-class UploadWizard(Wizard):
-    inner_form = None
-    def __init__(self, session, step, **kwargs):
-        super().__init__(session, step, **kwargs)
-
-    @classmethod
-    def get_file_info(cls, upload_form):
-        return None
-
-    def get_form_kwargs(self, step=None):
-        if step is None:
-            step = self.step
-        kwargs = super().get_form_kwargs(step)
-        if step != 0:
-            try:
-                kwargs0 = self.get_step_state(0)
-            except KeyError:
-                pass
-            else:
-                form0 = self.get_form(0)(**kwargs0)
-                form0.load_files()
-                form0.full_clean()
-
-                file_info = self.get_file_info(form0)
-
-                if file_info is not None:
-                    kwargs['file_info'] = file_info
-
-        return kwargs
-
-
-    def get_full_data(self):
-        data = {}
-        files = {}
-        for step in self.steps:
-            form = self.get_form(step)
-            if issubclass(form, BaseFieldMapFormSet):
-                f = form(data=self.get_step_state(step)['data'])
-                f.full_clean()
-                data.update(f.cleaned_data)
-                data['field_map'] = json.dumps(data['field_map'])
-                continue
-            data.update(self.get_step_state(step)['data'])
-            files.update(self.get_step_state(step)['files'])
-        return {"data": data, "files": files}
-
-
-def get_upload_wizard(script_class):
-
-    form = script_class.options_form
-    try:
-        return form.as_wizard_form()
-    except AttributeError:
-        pass
-
-    step_form = type("StepForm", (WizardStepForm, form), {})
-
-    class PluginWizard(UploadWizard):
-        inner_form = form
-        form_list = (step_form,)
-    return PluginWizard
 
 class ArticleSetUploadView(BaseMixin, WizardFormStepView):
     parent = ArticleSetUploadListView
@@ -154,5 +111,23 @@ class ArticleSetUploadView(BaseMixin, WizardFormStepView):
 
     def get_context_data(self, **kwargs):
         kwargs['script_name'] = self.plugin.label
-        kwargs['is_field_mapping_form'] = issubclass(self.wizard.get_form(), BaseFieldMapFormSet)
-        return super().get_context_data(**kwargs)
+        form = self.wizard.get_form()
+        if issubclass(form, BaseFieldMapFormSet):
+            kwargs['is_field_mapping_form'] = True
+            kwargs['field_autocomplete_data'] = form.known_properties
+        ctx = super().get_context_data(**kwargs)
+        return ctx
+
+    def get_wizard_kwargs(self):
+        return {
+           "project": self.project
+        }
+
+class ArticleSetUploadFieldMapView(BaseMixin, ScriptView):
+    parent = ArticleSetUploadListView
+    script = UploadCreateArticlesScript
+    model = Task
+    template_name = "project/articleset_upload.html"
+    url_fragment = "upload-selectfields"
+    view_name = "articleset-upload-fieldmap"
+

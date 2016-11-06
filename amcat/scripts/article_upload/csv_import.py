@@ -25,16 +25,13 @@ import datetime
 from django import forms
 from django.contrib.postgres.forms import JSONField
 
-from amcat.models import Article, Project
+from amcat.models import Project
 from amcat.scripts.article_upload import fileupload
-from amcat.scripts.article_upload.upload import UploadScript, ParseError, ARTICLE_FIELDS
-from amcat.scripts.article_upload.upload_formtools import get_fieldmap_form_set, FileInfo, FieldMapMixin
+from amcat.scripts.article_upload.upload import UploadScript, ParseError, ARTICLE_FIELDS, UploadWizard, REQUIRED, \
+    ZipFileUploadForm
+from amcat.scripts.article_upload.upload_formtools import get_fieldmap_form_set, FileInfo, FieldMapCleanMixin
 from amcat.tools.toolkit import read_date
 from amcat.tools.wizard import WizardStepForm
-from navigator.views.articleset_upload_views import UploadWizard
-
-REQUIRED = tuple(
-    field.name for field in Article._meta.get_fields() if field.name in ARTICLE_FIELDS and not field.blank)
 
 TYPES = {
     "date": datetime.datetime,
@@ -64,7 +61,7 @@ def get_parser(field_type):
     return PARSERS.get(field_type, lambda x: x)
 
 
-class CSVForm(FieldMapMixin, UploadScript.options_form, fileupload.CSVUploadForm):
+class CSVForm(FieldMapCleanMixin, ZipFileUploadForm):
     field_map = JSONField(max_length=2048,
                           help_text='Dictionary consisting of "<field>":{"column":"<column name>"} and/or "<field>":{"value":"<value>"} mappings.')
 
@@ -83,17 +80,10 @@ class CSVWizardForm(UploadWizard):
     inner_form = CSVForm
 
     def get_form_list(self):
-        upload_form = self.get_upload_step_form()
-        upload_form.base_fields['dialect'] = self.inner_form.base_fields['dialect']
+        upload_forms = super().get_form_list()
+        upload_forms.base_fields['dialect'] = self.inner_form.base_fields['dialect']
         field_form = get_fieldmap_form_set(REQUIRED, ARTICLE_FIELDS)
-        return [upload_form, field_form]
-
-    class CSVUploadStepForm(WizardStepForm, UploadScript.options_form, fileupload.CSVUploadForm):
-        project = forms.ModelChoiceField(queryset=Project.objects.all(), widget=forms.HiddenInput)
-
-    @classmethod
-    def get_upload_step_form(cls):
-        return cls.CSVUploadStepForm
+        return upload_forms + [field_form]
 
     @classmethod
     def get_file_info(cls, upload_form: fileupload.CSVUploadForm):
@@ -137,9 +127,6 @@ class CSV(UploadScript):
         "empty_val": 'Expected non-empty value for required field "{}".',
         "parse_value": 'Failed to parse value "{}". Expected type: {}.'
     }
-
-    def run(self, *args, **kargs):
-        return super(CSV, self).run(*args, **kargs)
 
     def parse_document(self, row):
         yield dict(row._asdict())

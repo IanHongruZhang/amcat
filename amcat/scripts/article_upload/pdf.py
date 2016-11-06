@@ -21,7 +21,7 @@
 A PDF parser
 """
 
-from pdfminer.pdfparser import PDFParser as module_parser
+from pdfminer.pdfparser import PDFParser as module_parser, PDFDocument, PDFPage
 from pdfminer.pdfinterp import PDFResourceManager, PDFPageInterpreter
 from pdfminer.converter import PDFPageAggregator
 from pdfminer.layout import LAParams, LTTextBox, LTTextLine, LTFigure

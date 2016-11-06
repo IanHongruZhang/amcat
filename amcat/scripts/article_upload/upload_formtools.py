@@ -1,19 +1,22 @@
+from typing import Iterable
+
 from django import forms
 
 from amcat.tools.wizard import WizardStepForm, WizardStepFormMixin
 
 
 class FileInfo:
-    def __init__(self, file_name, file_fields):
+    def __init__(self, file_name:str, file_fields: Iterable):
         self.file_name = file_name
-        self.file_fields = set(file_fields)
+        self.file_fields = list(file_fields)
 
 
 class BaseFieldMapFormSet(WizardStepFormMixin, forms.BaseFormSet):
     existing_fields = frozenset()
     required_fields = frozenset()
-
-    def __init__(self, *args, initial=None, file_info=None, **kwargs):
+    known_properties  = frozenset()
+    def __init__(self, *args, project=None, initial=None, file_info=None, known_property_names=(), set_property_names=(), **kwargs):
+        self.project = project
         self.file_info = file_info
         if not initial:
             initial = self.get_initial(file_info)
@@ -37,7 +40,6 @@ class BaseFieldMapFormSet(WizardStepFormMixin, forms.BaseFormSet):
         kwargs = super().get_form_kwargs(i)
         kwargs['required_field'] = i < len(self.required_fields)
         kwargs['file_info'] = self.file_info
-
         return kwargs
 
     def clean(self):
@@ -99,7 +101,7 @@ class FieldMapForm(forms.Form):
                                                                                     self.file_info.file_name))
         return cleaned_data
 
-class FieldMapMixin:
+class FieldMapCleanMixin:
 
     def clean_field_map(self):
         data = self.cleaned_data['field_map']
@@ -115,9 +117,10 @@ class FieldMapMixin:
         return data
 
 
-def get_fieldmap_form_set(required_fields, existing_fields):
+def get_fieldmap_form_set(required_fields, existing_fields, known_properties ):
     formset = forms.formset_factory(FieldMapForm, formset=BaseFieldMapFormSet, validate_max=False, extra=2)
     formset.required_fields = required_fields
     formset.existing_fields = existing_fields
+    formset.known_properties = known_properties
     return formset
 

@@ -25,13 +25,13 @@ Plugin for uploading pdf files of a certain markup, provided by BZK
 from datetime import date
 import re
 
-from amcat.scripts.article_upload.upload import UploadScript
+from amcat.scripts.article_upload.upload import UploadScript, UploadParser
 from amcat.models.article import Article
 from amcat.scripts.article_upload.pdf import PDFParser
 from amcat.scripts.article_upload.bzk_aliases import BZK_ALIASES as MEDIUM_ALIASES
 
 
-class BZKPDFScraper(UploadScript):
+class BZKPDFScraper(UploadParser):
     def _scrape_unit(self, unit):
         parser = PDFParser()
         self.index = []

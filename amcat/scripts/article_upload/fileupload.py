@@ -256,6 +256,11 @@ class ZipFileUploadForm(FileUploadForm):
         """
         with TemporaryFolder(*args, **kargs) as tempdir:
             with zipfile.ZipFile(zip_file) as zf:
+                for zinfo in zf.infolist():
+                    with zf.open(zinfo, 'rb') as f:
+                        yield f
+                return
+
                 for name in zf.namelist():
                     if name.endswith("/"): continue # skip folders
                     fn = os.path.basename(name)

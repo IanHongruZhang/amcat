@@ -20,18 +20,27 @@
 """
 Base module for article upload scripts
 """
-import datetime
+import os
+import json
+import pickle
 import logging
-import os.path
+import tempfile
+from typing import Iterable, List
+import zipfile
 
-
+import datetime
 from django import forms
-from django.forms.widgets import HiddenInput
+from django.contrib.postgres.forms import JSONField
+from django.core.files import File
+from django.core.files.uploadedfile import UploadedFile
+from django.forms import ModelChoiceField, ModelMultipleChoiceField
 
-from amcat.models import Article, Project, ArticleSet
-from amcat.models.articleset import create_new_articleset
+from amcat.forms.widgets import BootstrapMultipleSelect
+from amcat.models import Article, Project, ArticleSet, Task
 from amcat.scripts import script
-from amcat.scripts.article_upload.fileupload import RawFileUploadForm
+from amcat.scripts.article_upload.upload_formtools import BaseFieldMapFormSet
+from amcat.tools.amcates import ES
+from amcat.tools.wizard import Wizard, WizardStepForm
 
 log = logging.getLogger(__name__)
 
@@ -51,146 +60,255 @@ class MissingValueError(ArticleError):
         super().__init__("Missing value for field: '{}'".format(field), *args)
 
 
+class ParsedArticle():
+    def __init__(self, fields: dict = (), field_errors: list = ()) -> None:
+        self.fields = dict(fields)
+        self.errors = (field_errors)
 
-class UploadForm(RawFileUploadForm):
-    project = forms.ModelChoiceField(queryset=Project.objects.all())
 
-    articlesets = forms.ModelMultipleChoiceField(
-        queryset=ArticleSet.objects.all(), required=False,
-        help_text="If you choose an existing articleset, the articles will be "
-                  "appended to that set. If you leave this empty, a new articleset will be "
-                  "created using either the name given below, or using the file name")
+class ParserForm(forms.Form):
+    @classmethod
+    def as_wizard_steps(self) -> Iterable[forms.Form]:
+        return []
 
-    articleset_name = forms.CharField(
-        max_length=ArticleSet._meta.get_field_by_name('name')[0].max_length,
-        required=False)
 
-    def clean_articleset_name(self):
-        """If articleset name not specified, use file base name instead"""
-        if 'articlesets' in self.errors:
-            # skip check if error in articlesets: cleaned_data['articlesets'] does not exist
-            return
-        if self.files.get('file') and not (
-                    self.cleaned_data.get('articleset_name') or self.cleaned_data.get('articleset')):
-            fn = os.path.basename(self.files['file'].name)
-            return fn
-        name = self.cleaned_data['articleset_name']
-        if not bool(name) ^ bool(self.cleaned_data['articlesets']):
-            raise forms.ValidationError("Please specify either articleset or articleset_name")
-        return name
+class UploadWizardStepForm(WizardStepForm):
+    def __init__(self, *args, **kwargs):
+        self._project = kwargs.pop('project', kwargs.get('data', {}).get('project'))
+        super().__init__(*args, **kwargs)
+        if not isinstance(self._project, Project):
+            self._project = Project.objects.get(id=self._project)
+        if self._project is None:
+            raise TypeError("Expected 'project' in either kwargs or form data")
+
+
+class ZipFileUploadForm(UploadWizardStepForm):
+    file = forms.FileField(
+        help_text="You can also upload a zip file containing the desired files. Uploading very large files can take a long time. If you encounter timeout problems, consider uploading smaller files")
+    articlesets = forms.ModelMultipleChoiceField(queryset=ArticleSet.objects.all())
+    project = forms.ModelChoiceField(queryset=Project.objects.all(), widget=forms.HiddenInput)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["project"].initial = self._project
+        self.fields["articlesets"] = forms.ModelMultipleChoiceField(
+            queryset=self._project.all_articlesets(True),
+            widget=BootstrapMultipleSelect
+        )
+
+    def is_zip(self, file: File):
+        """
+        Tests if a file is a zipfile.
+        @param file: any open binary file object
+        @return: True if file is a zip file, otherwise false
+        """
+        p = file.tell()
+        file.seek(0)
+        iszip = file.read(4) == b"PK\3\4"
+        file.seek(p)
+        return iszip
+
+    def get_uploaded_texts(self):
+        """
+        Returns a list of DecodedFile objects representing the zipped files,
+        or just a [DecodedFile] if the uploaded file was not a .zip file.
+        """
+        f = self.files['file']
+        if self.is_zip(f):
+            return [f for f in self.iter_zip_file_contents(f)]
+        else:
+            return [f]
+
+    def get_entries(self) -> Iterable[File]:
+        return self.get_uploaded_texts()
+
+    def iter_zip_file_contents(self, zip_file):
+        """
+        Generator that unpacks and yields the zip entries as File objects. Skips folders.
+        @param zip_file: The zip file to iterate over.
+        """
+        with zipfile.ZipFile(zip_file) as zf:
+            for zinfo in zf.infolist():
+                if zinfo.filename.endswith("/"):
+                    continue
+                with zf.open(zinfo, 'rb') as f:
+                    yield File(f, zinfo.filename)
+
+
+
+class UploadParser:
+    options_form_class = ParserForm
+    def __init__(self, options_form: ParserForm):
+        self.options_form = options_form
+        self.options = options_form.cleaned_data
+
+    def parse_file(self, file: File) -> Iterable[ParsedArticle]:
+        pass
+
+    def get_options_form_class(self):
+        return self.options_form_class
+
+    def get_provenance(self) -> str:
+        return ""
+
+
+class UploadWizard(Wizard):
+    upload_form = ZipFileUploadForm
+
+    def __init__(self, session, step, project, **kwargs):
+        super().__init__(session, step, **kwargs)
+        self.project = project
 
     @classmethod
-    def get_empty(cls, project=None, post=None, files=None, **_options):
-        f = cls(post, files) if post is not None else cls()
-        if project:
-            f.fields['project'].initial = project.id
-            f.fields['project'].widget = HiddenInput()
-            f.fields['articlesets'].queryset = ArticleSet.objects.filter(project=project)
-        return f
+    def get_file_info(cls, upload_form):
+        return None
 
+    def get_form_list(self):
+        return [self.upload_form]
 
-class UploadScript(script.Script):
-    """Base class for Upload Scripts, which are scraper scripts driven by the
-    the script input.
-
-    For legacy reasons, parse_document and split_text may be used instead of the standard
-    get_units and scrape_unit.
-    """
-
-    options_form = UploadForm
-
-    def __init__(self, *args, **kargs):
-        super(UploadScript, self).__init__(*args, **kargs)
-        self.project = self.options['project']
-        self.errors = []
-
-    @property
-    def articlesets(self):
-        if self.options['articlesets']:
-            return self.options['articlesets']
-
-        if self.options['articleset_name']:
-            aset = create_new_articleset(self.options['articleset_name'], self.project)
-            self.options['articlesets'] = (aset,)
-            return (aset,)
-
-        return ()
-
-    def explain_error(self, error, article=None):
-        """Explain the error in the context of unit for the end user"""
-        index = " {}".format(article) if article is not None else ""
-        return "Error in article or filepart{}: {}.".format(index, error)
-
-    def decode(self, bytes):
-        """Decode the bytes using the encoding from the form"""
-        enc, text = self.bound_form.decode(bytes)
-        return text
-
-    @property
-    def uploaded_texts(self):
-        """A cached sequence of UploadedFile objects"""
-        try:
-            return self._input_texts
-        except AttributeError:
-            self._input_texts = self.bound_form.get_uploaded_texts()
-            return self._input_texts
-
-    def get_provenance(self, file, articles):
-        n = len(articles)
-        filename = file and file.name
-        timestamp = str(datetime.datetime.now())[:16]
-        return ("[{timestamp}] Uploaded {n} articles from file {filename!r} "
-                "using {self.__class__.__name__}".format(**locals()))
-
-    def parse_file(self, file):
-        for i, unit in enumerate(self._get_units(file), 1):
+    def get_form_kwargs(self, step=None):
+        es = ES()
+        if step is None:
+            step = self.step
+        kwargs = super().get_form_kwargs(step)
+        kwargs['project'] = self.project
+        if step != 0:
             try:
-                for a in self._scrape_unit(unit):
-                    yield a
-            except ParseError as e:
-                raise ParseError("{}".format(self.explain_error(e, article=i)))
+                kwargs0 = self.get_form_kwargs(0)
+            except KeyError:
+                pass
+            else:
+                form0 = self.get_form(0)(**kwargs0)
+                form0.load_files()
+                form0.full_clean()
 
-    def run(self, _dummy=None):
-        monitor = self.progress_monitor
+                file_info = self.get_file_info(form0)
 
-        file = self.options['file']
-        filename = file and file.name
-        monitor.update(10, u"Importing {self.__class__.__name__} from {filename} into {self.project}"
-                       .format(**locals()))
+                if file_info is not None:
+                    kwargs['file_info'] = file_info
 
-        articles_errors = []
+                if 'articlesets' in form0:
+                    kwargs['set_property_names'] = es.get_used_properties(form0['articlesets'])
 
-        files = list(self._get_files())
-        nfiles = len(files)
-        for i, f in enumerate(files):
-            filename = getattr(f, 'name', str(f))
-            monitor.update(20 / nfiles, "Parsing file {i}/{nfiles}: {filename}".format(**locals()))
-            articles_errors += [(x, None) if isinstance(x, Article) else (None, x) for x in self.parse_file(f)]
+        return kwargs
 
-        article_error = False
-        for article, error in articles_errors:
-            if error:
-                article_error = True
-            if isinstance(article, Article):
-                _set_project(article, self.project)
 
-        articles, errors = map(list, zip(*articles_errors))
+    def get_full_data(self):
+        data = {}
+        files = {}
+        for step in self.steps:
+            form = self.get_form(step)
+            if issubclass(form, BaseFieldMapFormSet):
+                f = form(data=self.get_step_state(step)['data'])
+                f.full_clean()
+                data.update(f.cleaned_data)
+                data['field_map'] = json.dumps(data['field_map'])
+                continue
+            data.update(self.get_step_state(step)['data'])
+            files.update(self.get_step_state(step)['files'])
+        return {"data": data, "files": files}
 
-        if self.errors or article_error:
-            article_errors = [errors for error in errors if error]
-            raise ParseError(self.errors, article_errors)
 
-        monitor.update(10, "All files parsed, saving {n} articles".format(n=len(articles)))
-        Article.create_articles(articles, articlesets=self.articlesets,
-                                monitor=monitor.submonitor(40))
+class UploadScriptMeta(type):
+    def __new__(cls, name, bases, attrs):
+        newcls = super(UploadScriptMeta, cls).__new__(cls, name, bases, attrs)
+        try:
+            newcls.options_form = type("AutoOptionsForm", (ZipFileUploadForm, newcls.parser_class.options_form_class), {})
+        except AttributeError:
+            pass
+        return newcls
 
-        if not articles:
-            raise Exception("No articles were imported")
+class UploadScript(script.Script, metaclass=UploadScriptMeta):
+    parser_class = None
+    customizable_fields = True
 
-        monitor.update(10, "Uploaded {n} articles, post-processing".format(n=len(articles)))
-        self.postprocess(articles)
+    def get_files(self) -> List[File]:
+        form = ZipFileUploadForm(data=self.bound_form.data, files=self.bound_form.files)
+        files = list(form.get_entries())
+        return files
 
-        for aset in self.articlesets:
+    def get_parser(self) -> UploadParser:
+        print(self.parser_class.options_form_class)
+        opts = self.parser_class.options_form_class(data=self.bound_form.data, files=self.bound_form.files)
+        opts.full_clean()
+        if not opts.is_valid():
+            raise Exception(opts.errors)
+        return self.parser_class(opts)
+
+    def run(self):
+        parsed_articles = []
+        parser = self.get_parser()
+        files = self.get_files()
+        for i, file in enumerate(files):
+            self.progress_monitor.update(10, "Parsing file {} / {} ({})".format(i, len(files), file.name))
+            p = parser.parse_file(file)
+            parsed_articles.extend(p)
+
+        self.progress_monitor.update(10, "Collecting article fields")
+        valid = True
+        fields = {}
+        for i, a in enumerate(parsed_articles):
+            if a.errors:
+                valid = False
+            print(a.fields)
+            for field in a.fields.keys():
+                complete = True
+                if field not in fields:
+                    complete = (i == 0)
+                fields[field] = {"field_name": field, "complete": complete}
+            for fieldname, field in fields.items():
+                if fieldname not in a.fields:
+                    field['complete'] = False
+
+        if not valid:
+            raise Exception([e for a in parsed_articles for e in a.errors])
+
+        self.progress_monitor.update(10, "Serializing results")
+        with tempfile.NamedTemporaryFile(suffix=".parseresult", delete=False) as f:
+            pickle.dump([{"fields": a.fields, "errors": a.errors} for a in parsed_articles], f)
+        return f.name, list(fields.values())
+
+
+class UploadCreateArticlesScript(script.Script):
+    class options_form:
+        field_map = JSONField(max_length=2048,
+                              help_text='Dictionary consisting of "<field>":{"column":"<column name>"} and/or "<field>":{"value":"<value>"} mappings.')
+        calling_task = ModelChoiceField(queryset=Task.objects.all())
+
+    def run(self):
+        calling_task = self.options["calling_task"]
+        article_dicts, fields = self.get_task_result()
+
+        project = calling_task.arguments['project']
+        articlesets = calling_task.arguments['articlesets']
+        file = calling_task.arguments['file']
+
+        mapped_articles = []
+        if self.options["fieldmap"] != "nomap":
+            for a in article_dicts:
+                mapped_art = {}
+                for k, v in self.options["fieldmap"].items():
+                    if 'column' in v and v['column'] in a:
+                        mapped_art[k] = a[v['column']]
+                    elif ('column' in v and v['column'] not in a and 'value' in v
+                          or 'column' not in v and 'value' in v):
+                        mapped_art[k] = v['value']
+                    else:
+                        raise MissingValueError("{} missing from {}".format(v, a))
+                mapped_articles.append(mapped_art)
+        else:
+            mapped_articles = article_dicts
+
+        articles = list(self.get_articles(mapped_articles))
+
+        Article.create_articles(articles, articlesets=articlesets,
+                                monitor=self.progress_monitor.submonitor(40))
+
+        for art in articles:
+            _set_project(art, project)
+
+        self.progress_monitor.update(10, "Uploaded {n} articles, post-processing".format(n=len(articles)))
+
+        for aset in articlesets:
             new_provenance = self.get_provenance(file, articles)
             aset.provenance = ("%s\n%s" % (aset.provenance or "", new_provenance)).strip()
             aset.save()
@@ -198,79 +316,31 @@ class UploadScript(script.Script):
         if getattr(self, 'task', None):
             self.task.log_usage("articles", "upload", n=len(articles))
 
-        monitor.update(10, "Done! Uploaded articles".format(n=len(articles)))
-        return [a.id for a in self.articlesets]
+        self.progress_monitor.update(10, "Done! Uploaded articles".format(n=len(articles)))
+        return [a.id for a in articlesets]
 
-    def postprocess(self, articles):
-        """
-        Optional postprocessing of articles. Removing aricles from the list will exclude them from the
-        articleset (if needed, list should be changed in place)
-        """
-        pass
+    def get_task_result(self):
+        calling_task = self.options["calling_task"]
+        tf, fields = calling_task.get_async_result()
+        if not tf.endswith(".parseresult"):
+            raise Exception("Unexpected calling task result: {}".format(tf))
+        with open(tf, "rb") as f:
+            calling_task_articles = pickle.load(f)
+        os.remove(tf)
+        return calling_task_articles, fields
 
-    def _get_files(self):
-        return self.bound_form.get_entries()
+    def get_articles(self, article_dicts) -> Iterable[Article]:
+        for adict in article_dicts:
+            fields = {k: v for k, v in adict.items() if k in ARTICLE_FIELDS}
+            properties = {k: v for k, v in adict.items() if k not in ARTICLE_FIELDS}
+            return Article(properties=properties, **fields)
 
-    def _get_units(self, file):
-        return self.split_file(file)
-
-    def _scrape_unit(self, document):
-        result = self.parse_document(document)
-        if isinstance(result, Article):
-            result = [result]
-        for art in result:
-            if isinstance(art, dict):
-                try:
-                    yield self.article_from_dict(art)
-                except ArticleError as e:
-                    yield e
-            else:
-                yield art
-
-    def article_from_dict(self, parse_dict):
-        mapped_fields = {}
-        if 'field_map' in self.options:
-            for field_to, field_from in self.options['field_map'].items():
-                value = None
-                if 'column' in field_from:
-                    value = parse_dict.get(field_from['column'])
-                if value is None and (field_from.get('use_default') or 'column' not in field_from):
-                    try:
-                        value = field_from['value']
-                    except KeyError:
-                        raise MissingValueError(field_to)
-                mapped_fields[field_to] = value
-        article_kwargs = {}
-
-        for article_field in ARTICLE_FIELDS:
-            article_kwargs[article_field] = mapped_fields.pop(article_field, None)
-
-        for article_field in get_required():
-            if article_kwargs[article_field] is None:
-                raise MissingValueError(article_field)
-
-        article_kwargs['properties'] = mapped_fields
-
-        return Article(**article_kwargs)
-
-    def parse_document(self, document):
-        """
-        Parse the document as one or more articles, provided for legacy purposes
-
-        @param document: object received from split_text, e.g. a string fragment
-        @return: None, an Article or a sequence of Article(s)
-        """
-        raise NotImplementedError()
-
-    def split_file(self, file):
-        """
-        Split the file into one or more fragments representing individual documents.
-        Default implementation returns a single fragment containing the unicode text.
-
-        @type file: file like object
-        @return: a sequence of objects (e.g. strings) to pass to parse_documents
-        """
-        return [file]
+    def get_provenance(self, file, articles):
+        n = len(articles)
+        filename = file and file.name
+        timestamp = str(datetime.datetime.now())[:16]
+        return ("[{timestamp}] Uploaded {n} articles from file {filename!r} "
+                "using {self.__class__.__name__}".format(**locals()))
 
 
 def _set_project(art, project):
@@ -281,12 +351,21 @@ def _set_project(art, project):
     art.project = project
 
 
-_required = set()
+def _create_wizard(base_wizard, forms):
+    class Wizard(base_wizard):
+        def get_form_list(self):
+            return super().get_form_list() + forms
+    return Wizard
 
 
-def get_required():
-    if not _required:
-        for field in ARTICLE_FIELDS:
-            if not Article._meta.get_field(field).blank:
-                _required.add(field)
-    return _required
+def get_upload_wizard(script_class):
+    form = script_class.parser_class.options_form_class
+    if hasattr(form, 'as_wizard'):
+        return form.as_wizard()
+    else:
+        return _create_wizard(UploadWizard, [script_class.parser_class.options_form_class])
+
+
+
+REQUIRED = tuple(
+    field.name for field in Article._meta.get_fields() if field.name in ARTICLE_FIELDS and not field.blank)

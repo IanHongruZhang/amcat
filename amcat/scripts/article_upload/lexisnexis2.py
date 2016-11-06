@@ -4,18 +4,25 @@ import sys
 from contextlib import contextmanager
 from logging import getLogger
 
+import io
+
+import chardet
 import pyparsing as pp
+
+from django import forms
 from django.contrib.postgres.forms import JSONField
 
 from amcat.scripts.article_upload import fileupload
-from amcat.scripts.article_upload.csv_import import REQUIRED
-from amcat.scripts.article_upload.upload import ARTICLE_FIELDS, UploadScript, ParseError
-from amcat.scripts.article_upload.upload_formtools import FileInfo, get_fieldmap_form_set, FieldMapMixin
+from amcat.scripts.article_upload.fileupload import ZipFileUploadForm
+from amcat.scripts.article_upload.upload import ARTICLE_FIELDS, UploadScript, ParseError, UploadWizard, UploadParser, \
+    ParsedArticle, REQUIRED, UploadWizardStepForm
+from amcat.scripts.article_upload.upload_formtools import FileInfo, get_fieldmap_form_set, FieldMapCleanMixin
 from amcat.tools.toolkit import read_date
 from amcat.tools.wizard import WizardStepFormMixin
 from navigator.views.articleset_upload_views import UploadWizard
 
 log = getLogger(__name__)
+
 QUARTERS = dict(spring=3,
                 summer=6,
                 fall=9,
@@ -187,25 +194,11 @@ header_parser = header()
 article_parser = article()
 
 
-def parse_error_as_dict(e, **kwargs):
-    return {
-        "exception": dict({
-            "type": type(e).__name__,
-            "msg": e.msg,
-            "line": e.line,
-            "loc": e.loc,
-            "col": e.col,
-            "lineno": e.lineno
-        }, **kwargs)
-    }
-
-
 def parse_article(article_txt):
     try:
         return article_parser.parseString(article_txt).article[0]
     except pp.ParseException as e:
         log.warning(e)
-        log.warning(parse_error_as_dict(e), article_txt.split("\n", 1)[0])
         raise ParseError(str(e))
 
 
@@ -228,49 +221,46 @@ def get_file_info(file):
     log.info("{} articles in file".format(len(article_txts)))
     articles = list(parse_articles(article_txts[:10]))
     print(articles[0])
-
     header_keys = set(key for key, value in header.items() if value)
     article_keys = set(key for article in articles for key, value in article.items() if value)
-    return FileInfo(file.name, (header_keys | article_keys))
+    all_keys = list(header_keys | article_keys)
+    all_keys.sort()
+    base_keys = ["medium", "title", "date"]
+    return FileInfo(file.name, base_keys + all_keys)
 
 
-class LexisNexisForm(UploadScript.options_form, fileupload.ZipFileUploadForm, FieldMapMixin):
-    field_map = JSONField(max_length=2048,
-                          help_text='Dictionary consisting of "<field>":{"column":"<column name>"} and/or "<field>":{"value":"<value>"} mappings.')
+class LexisNexisForm(FieldMapCleanMixin, UploadWizardStepForm):
+    #field_map = JSONField(max_length=2048,
+    #                      help_text='Dictionary consisting of "<field>":{"column":"<column name>"} and/or "<field>":{"value":"<value>"} mappings.')
 
     @classmethod
-    def as_wizard_form(cls):
-        return LexisNexisWizardForm
+    def as_wizard(cls):
+        return LexisNexisWizard
 
 
-class LexisNexisWizardForm(UploadWizard):
+class LexisNexisWizard(UploadWizard):
     def get_form_list(self):
-        upload_form = self.get_upload_step_form()
-        field_form = get_fieldmap_form_set(REQUIRED, ARTICLE_FIELDS)
-        return [upload_form, field_form]
-
-    class CSVUploadStepForm(WizardStepFormMixin, UploadScript.options_form, fileupload.ZipFileUploadForm): pass
+        upload_forms = super().get_form_list()
+        field_form = get_fieldmap_form_set(REQUIRED, ARTICLE_FIELDS, ["foo", "bar", "foobar"])
+        return upload_forms #+ [field_form]
 
     @classmethod
-    def get_upload_step_form(cls):
-        return cls.CSVUploadStepForm
-
-    @classmethod
-    def get_file_info(cls, upload_form: fileupload.CSVUploadForm):
+    def get_file_info(cls, upload_form: ZipFileUploadForm):
+        return
         file = list(upload_form.get_entries())[0]
-        return get_file_info(file)
+        file = io.TextIOWrapper(file.file, encoding=chardet.detect(file.read(1024))["encoding"])
+        fi = get_file_info(file)
+        return fi
 
 
-class LexisNexis(UploadScript):
+class LexisNexisParser(UploadParser):
     """
     Script for importing files from Lexis Nexis. The files should be in plain text
     format with a 'cover page'. The script will extract the metadata (headline, source,
     date etc.) from the file automatically.
     """
 
-    options_form = LexisNexisForm
-
-    name = 'Lexis Nexis (wizard)'
+    options_form_class = LexisNexisForm
 
     query_keys = ["zoektermen", "query", "terms"]
 
@@ -289,7 +279,7 @@ class LexisNexis(UploadScript):
             lines.append(line)
 
     def get_provenance(self, file, articles):
-        provenance = super(LexisNexis, self).get_provenance(file, articles)
+        provenance = super().get_provenance(file, articles)
 
         query = None
         for key in self.query_keys:
@@ -302,9 +292,16 @@ class LexisNexis(UploadScript):
 
         return "{provenance}; LexisNexis query: {query!r}".format(**locals())
 
-    def parse_document(self, text):
-        fields = parse_article(text)
-        if fields is None:
-            return
+    def parse_file(self, file):
+        file = io.TextIOWrapper(file.file, encoding=chardet.detect(file.read(1024))["encoding"])
+        docs = self.split_file(file)
+        for article_txt in docs:
+            try:
+                yield ParsedArticle(article_parser.parseString(article_txt).article[0])
+            except pp.ParseException as e:
+                yield ParsedArticle({"text": article_txt[:200]}, [e])
 
-        yield dict(fields)
+
+class LexisNexis(UploadScript):
+    name = 'Lexis Nexis (wizard)'
+    parser_class = LexisNexisParser

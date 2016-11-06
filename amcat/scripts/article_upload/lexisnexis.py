@@ -26,6 +26,8 @@ import re
 import collections
 import logging
 
+from django import forms
+
 from amcat.scripts.article_upload.upload import UploadScript, ParseError
 from amcat.scripts.article_upload import fileupload
 from amcat.tools import toolkit
@@ -560,7 +562,7 @@ class LexisNexis(UploadScript):
     date etc.) from the file automatically.
     """
 
-    class options_form(UploadScript.options_form, fileupload.ZipFileUploadForm):
+    class options_form(forms.Form):
         pass
 
     name = 'Lexis Nexis'

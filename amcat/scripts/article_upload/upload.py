@@ -37,9 +37,9 @@ from django.forms.widgets import HiddenInput
 
 from amcat.models import Article, ArticleSet, Project
 from amcat.models.articleset import create_new_articleset
-from amcat.scripts.article_upload.plugins import load_plugins
 from amcat.tools import amcates
 from amcat.tools.progress import NullMonitor
+
 
 log = logging.getLogger(__name__)
 
@@ -302,7 +302,7 @@ def _set_project(art, project):
     art.project = project
 
 
-_registered_plugins = None
+_registered_plugins = {}
 
 def register_plugin(name:str=None):
     """
@@ -330,14 +330,15 @@ def register_plugin(name:str=None):
 
     return fn
 
-def get_upload_scripts():
+def get_upload_plugins():
     global _registered_plugins
-    if _registered_plugins is None:
-        _registered_plugins = OrderedDict()
-        load_plugins()
+    if not _registered_plugins:
+        # noinspection PyUnresolvedReferences
+        import amcat.scripts.article_upload.plugins
         _registered_plugins = OrderedDict(sorted(_registered_plugins.items()))
     return _registered_plugins
 
 
 def get_upload_script(name):
-    return _registered_plugins[name]
+    return get_upload_plugins()[name]
+

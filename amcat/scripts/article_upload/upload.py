@@ -25,27 +25,26 @@ import json
 import logging
 import os.path
 import zipfile
+from collections import OrderedDict
+
 import chardet
-
-from io import TextIOWrapper
 from actionform import ActionForm
-
 from django import forms
 from django.contrib.postgres.forms import JSONField
-from django.core.files import File
 from django.core.files.utils import FileProxyMixin
 from django.core.serializers.json import DjangoJSONEncoder
 from django.forms.widgets import HiddenInput
-from os.path import dirname
 
 from amcat.models import Article, ArticleSet, Project
 from amcat.models.articleset import create_new_articleset
+from amcat.scripts.article_upload.plugins import load_plugins
 from amcat.tools import amcates
 from amcat.tools.progress import NullMonitor
 
 log = logging.getLogger(__name__)
 
-REQUIRED = tuple(field.name for field in Article._meta.get_fields() if field.name in amcates.ARTICLE_FIELDS and not field.blank)
+REQUIRED = tuple(
+    field.name for field in Article._meta.get_fields() if field.name in amcates.ARTICLE_FIELDS and not field.blank)
 
 # HACK: Django's FileProxyMixin misses the readable and writable properties of IOBase,
 # HACK: see Django ticket #26646 fixed in Django 1.11+.
@@ -72,6 +71,7 @@ class ArticleField(object):
     Simple 'struct' to hold information about fields in uploaded files
     in order to build the 'upload options' page
     """
+
     def __init__(self, label, destination=None, values=None, possible_types=None, suggested_type=None):
         self.label = label  # name in uploaded file
         self.suggested_destination = destination  # suggested destination model field
@@ -85,7 +85,7 @@ class ArticleField(object):
 
 
 class ParseError(Exception):
-    pass 
+    pass
 
 
 class UploadForm(forms.Form):
@@ -102,10 +102,10 @@ class UploadForm(forms.Form):
         max_length=ArticleSet._meta.get_field('name').max_length,
         required=False)
 
-    encoding = forms.ChoiceField(choices=[(x,x) for x in ["Autodetect", "ISO-8859-15", "UTF-8", "Latin-1"]])
+    encoding = forms.ChoiceField(choices=[(x, x) for x in ["Autodetect", "ISO-8859-15", "UTF-8", "Latin-1"]])
     field_map = JSONField(validators=[validate_field_map],
-        help_text='json dict with property names (title, date, etc.) as keys, and field settings as values. '
-                   'Field settings should have the form {"type": "field"/"literal", "value": "field_name_or_literal"}')
+                          help_text='json dict with property names (title, date, etc.) as keys, and field settings as values. '
+                                    'Field settings should have the form {"type": "field"/"literal", "value": "field_name_or_literal"}')
 
     def clean_articleset_name(self):
         """If articleset name not specified, use file base name instead"""
@@ -122,7 +122,7 @@ class UploadForm(forms.Form):
         if not bool(name) ^ bool(self.cleaned_data['articleset']):
             raise forms.ValidationError("Please specify either articleset or articleset_name")
         return name
-    
+
     @classmethod
     def get_empty(cls, project=None, post=None, files=None, **_options):
         f = cls(post, files) if post is not None else cls()
@@ -139,7 +139,7 @@ class UploadForm(forms.Form):
 def _open(file, encoding):
     """Open the file in str (unicode) mode, guessing encoding if needed"""
     if encoding.lower() == 'autodetect':
-        bytes =open(file, mode='rb').read(1000)
+        bytes = open(file, mode='rb').read(1000)
         encoding = chardet.detect(bytes[:1000])["encoding"]
         log.info("Guessed encoding: {encoding}".format(**locals()))
     return open(file, encoding=encoding)
@@ -169,7 +169,7 @@ class UploadScript(ActionForm):
         Return a sequence of ArticleField objects listing the fields in the uploaded file(s)
         """
         return []
-    
+
     def parse_file(self, file):
         raise NotImplementedError()
 
@@ -258,7 +258,7 @@ class UploadScript(ActionForm):
 
         for article in articles:
             _set_project(article, self.project)
-        
+
         if self.errors:
             raise ParseError(" ".join(map(str, self.errors)))
         monitor.update(10, "All files parsed, saving {n} articles".format(n=len(articles)))
@@ -281,7 +281,6 @@ class UploadScript(ActionForm):
         monitor.update(10, "Done! Uploaded articles".format(n=len(articles)))
         return self.options["articleset"]
 
-
     def map_article(self, art_dict):
         mapped_dict = {}
         for destination, field in self.options['field_map'].items():
@@ -301,3 +300,44 @@ def _set_project(art, project):
     except Project.DoesNotExist:
         pass  # django throws DNE on x.y if y is not set and not nullable
     art.project = project
+
+
+_registered_plugins = None
+
+def register_plugin(name:str=None):
+    """
+    Creates a decorator that registeres the plugin to AmCAT. This decorator is required for the plugin in order to
+     show up in the uploader.
+     Usage:
+        >>> @register_plugin(name="My Plugin")
+        >>> class MyPlugin:
+        >>>     ...
+
+    @param name:    A human readable name to be used as unique identifier.
+                    If not given, the __name__ attribute will be used.
+    @param default  Register the plugin as a project default.
+    @return:        A class decorator function that registers the class as a plugin.
+    """
+
+    def fn(plugin_cls: type) -> type:
+        if not issubclass(plugin_cls, UploadScript):
+            return
+        plugin_name = name if name is not None else plugin_cls.__name__
+        if plugin_name in _registered_plugins:
+            raise ValueError("Name '{}' is not unique.".format(plugin_name))
+        _registered_plugins[plugin_name] = plugin_cls
+        return plugin_cls
+
+    return fn
+
+def get_upload_scripts():
+    global _registered_plugins
+    if _registered_plugins is None:
+        _registered_plugins = OrderedDict()
+        load_plugins()
+        _registered_plugins = OrderedDict(sorted(_registered_plugins.items()))
+    return _registered_plugins
+
+
+def get_upload_script(name):
+    return _registered_plugins[name]
